@@ -58,11 +58,14 @@ requirements.txt
 .env.example
 ```
 
-## Setup
+## Setup (Mac)
+
+Recommended Python: **3.10.x** (validated with Python 3.10.19).  
+`chainladder==0.8.25` is pinned for compatibility with this stack.
 
 1. **Create and activate virtual environment**
    ```bash
-   python -m venv .venv
+   python3.10 -m venv .venv
    source .venv/bin/activate
    ```
 
@@ -121,5 +124,14 @@ Planned enhancements:
 
 ```bash
 python -m py_compile app.py reserving_app/core/*.py reserving_app/services/*.py
+pytest -q
 ```
 
+## Troubleshooting
+
+- **OpenAI assistant returns key error**  
+  Ensure `.env` contains `OPENAI_API_KEY=...` and restart Streamlit.
+- **Excel upload issues**  
+  Confirm file extension is `.xlsx` (not `.xls`) and sheet has headers in row 1.
+- **Model run fails after exclusion input**  
+  Exclusions must be `row,col` pairs separated by semicolons, e.g. `0,1;2,3`.
