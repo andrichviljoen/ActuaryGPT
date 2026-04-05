@@ -38,6 +38,7 @@ A production-style Streamlit web application for actuarial reserving analysis wi
 
 ```
 app.py
+reserving_app/
 app/
   core/
     config.py
@@ -120,6 +121,7 @@ Planned enhancements:
 ## Testing (suggested)
 
 ```bash
+python -m py_compile app.py reserving_app/core/*.py reserving_app/services/*.py
 python -m py_compile app.py app/core/*.py app/services/*.py
 ```
 
