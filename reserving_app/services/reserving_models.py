@@ -28,6 +28,33 @@ class BootstrapResult:
     summary: pd.Series
 
 
+def _to_chainladder_triangle(cumulative: pd.DataFrame):
+    records = []
+    for i, origin_label in enumerate(cumulative.index):
+        origin_dt = pd.Timestamp(year=2000 + i, month=1, day=1)
+        row_values = cumulative.loc[origin_label].astype(float).values
+        non_zero_positions = np.where(row_values != 0)[0]
+        last_observed = int(non_zero_positions.max()) if len(non_zero_positions) > 0 else -1
+        for j, dev_col in enumerate(cumulative.columns):
+            valuation_dt = origin_dt + pd.DateOffset(months=12 * j)
+            value = float(cumulative.loc[origin_label, dev_col]) if j <= last_observed else np.nan
+            records.append(
+                {
+                    "origin": origin_dt.strftime("%Y-%m-%d"),
+                    "development": valuation_dt.strftime("%Y-%m-%d"),
+                    "value": value,
+                }
+            )
+    long_df = pd.DataFrame(records)
+    return cl.Triangle(
+        long_df,
+        origin="origin",
+        development="development",
+        columns=["value"],
+        cumulative=True,
+    )
+
+
 def _selected_ldf(cumulative: pd.DataFrame, exclusions: set[tuple[int, int]] | None = None) -> pd.Series:
     lr = link_ratio_matrix(cumulative)
     weights = cumulative.iloc[:, :-1].copy()
@@ -107,3 +134,57 @@ def _fallback_bootstrap(cumulative: pd.DataFrame, n_sims: int) -> pd.Series:
     noise = np.random.normal(loc=1.0, scale=0.15, size=n_sims)
     noise = np.clip(noise, 0.5, 1.8)
     return pd.Series(base * noise)
+
+
+def run_bootstrap_odp_distribution(
+    cumulative: pd.DataFrame,
+    n_sims: int,
+    random_state: int | None = None,
+    drop_high=None,
+    drop_low=None,
+) -> pd.Series:
+    if cl is None:
+        raise RuntimeError("chainladder package is not available.")
+    try:
+        tri = _to_chainladder_triangle(cumulative)
+        sims = cl.BootstrapODPSample(
+            n_sims=n_sims,
+            random_state=random_state,
+            drop_high=drop_high,
+            drop_low=drop_low,
+        ).fit_transform(tri)
+        model = cl.Chainladder().fit(sims)
+        ibnr_values = np.asarray(model.ibnr_.values)
+        return pd.Series(ibnr_values.sum(axis=(1, 2, 3)).flatten(), name="ibnr")
+    except Exception as exc:
+        raise ValueError(f"Triangle is not suitable for BootstrapODPSample: {exc}") from exc
+
+
+def run_bootstrap_odp_variability_comparison(
+    cumulative: pd.DataFrame,
+    n_sims: int,
+    random_state: int | None,
+    drop_high_count: int,
+    drop_low_count: int,
+) -> pd.DataFrame:
+    try:
+        tri = _to_chainladder_triangle(cumulative)
+        dev_count = max(tri.shape[-1] - 1, 1)
+        drop_high = [True] * min(drop_high_count, dev_count) + [False] * max(dev_count - drop_high_count, 0)
+        drop_low = [True] * min(drop_low_count, dev_count) + [False] * max(dev_count - drop_low_count, 0)
+
+        s1 = cl.BootstrapODPSample(n_sims=n_sims, random_state=random_state).fit(tri).resampled_triangles_
+        s2 = cl.BootstrapODPSample(
+            drop_high=drop_high,
+            drop_low=drop_low,
+            n_sims=n_sims,
+            random_state=random_state,
+        ).fit_transform(tri)
+
+        original_values = np.asarray(cl.Chainladder().fit(s1).ibnr_.values)
+        dropped_values = np.asarray(cl.Chainladder().fit(s2).ibnr_.values)
+        original = pd.Series(original_values.sum(axis=(1, 2, 3)).flatten(), name="Original")
+        dropped = pd.Series(dropped_values.sum(axis=(1, 2, 3)).flatten(), name="Dropped")
+        return pd.concat([original, dropped], axis=1)
+    except Exception as exc:
+        raise ValueError(f"Triangle is not suitable for bootstrap variability comparison: {exc}") from exc

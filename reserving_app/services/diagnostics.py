@@ -27,3 +27,16 @@ def sparse_data_warnings(triangle: pd.DataFrame) -> list[str]:
         warnings.append("Triangle is sparse (<40% populated). Consider aggregating to coarser periods.")
 
     return warnings
+
+
+def negative_value_warning(triangle: pd.DataFrame) -> list[str]:
+    if (triangle < 0).any().any():
+        return ["Triangle contains negative values. Verify whether recoveries/adjustments are expected."]
+    return []
+
+
+def non_monotonic_cumulative_warning(cumulative_triangle: pd.DataFrame) -> list[str]:
+    diffs = cumulative_triangle.diff(axis=1).iloc[:, 1:]
+    if (diffs < 0).any().any():
+        return ["Cumulative triangle is non-monotonic in at least one origin period."]
+    return []

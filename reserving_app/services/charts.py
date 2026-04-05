@@ -49,3 +49,23 @@ def percentile_chart(summary: pd.Series):
     fig = px.line(x=points, y=values, markers=True, title="Reserve Uncertainty Percentiles")
     fig.update_yaxes(title="Reserve")
     return fig
+
+
+def bootstrap_comparison_histogram(comparison_df: pd.DataFrame):
+    fig = go.Figure()
+    for col in comparison_df.columns:
+        fig.add_trace(
+            go.Histogram(
+                x=comparison_df[col].dropna(),
+                name=str(col),
+                opacity=0.6,
+                nbinsx=40,
+            )
+        )
+    fig.update_layout(
+        title="Bootstrap ODP Variability Comparison",
+        barmode="overlay",
+        xaxis_title="IBNR / Reserve",
+        yaxis_title="Count",
+    )
+    return fig
