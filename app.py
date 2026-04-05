@@ -17,6 +17,7 @@ from reserving_app.services.charts import reserve_by_origin_chart
 from reserving_app.services.data_ingestion import detect_excel_sheets, load_file
 from reserving_app.services.diagnostics import detect_outlier_link_ratios, sparse_data_warnings
 from reserving_app.services.mapping_validation import ALL_FIELDS, suggest_mapping, validate_mapping
+from reserving_app.services.input_parsing import parse_exclusion_cells
 from reserving_app.services.reporting import build_pdf_report, export_tables_to_excel
 from reserving_app.services.reserving_models import run_bootstrap_chain_ladder, run_chain_ladder
 from reserving_app.services.triangle_builder import build_triangle
@@ -50,11 +51,14 @@ with st.sidebar:
     demo_mode = st.button("One-click demo mode")
 
 if demo_mode:
-    demo_df = pd.read_csv("data/demo_claims.csv")
-    st.session_state.df = demo_df
-    st.session_state.file_name = "demo_claims.csv"
-    st.session_state.mapping = suggest_mapping(list(demo_df.columns))
-    st.success("Demo dataset loaded.")
+    try:
+        demo_df = pd.read_csv("data/demo_claims.csv")
+        st.session_state.df = demo_df
+        st.session_state.file_name = "demo_claims.csv"
+        st.session_state.mapping = suggest_mapping(list(demo_df.columns))
+        st.success("Demo dataset loaded.")
+    except Exception as exc:
+        st.error(f"Unable to load demo dataset: {exc}")
 
 if section == "Upload Data":
     st.subheader("Upload claims data")
@@ -68,16 +72,19 @@ if section == "Upload Data":
             sheet = st.selectbox("Select sheet", sheets)
 
         if st.button("Ingest file"):
-            result = load_file(uploaded.name, file_bytes, sheet)
-            st.session_state.df = result.df
-            st.session_state.file_name = uploaded.name
-            st.session_state.mapping = suggest_mapping(list(result.df.columns))
-            st.session_state.audit_trail.append(f"[{datetime.utcnow().isoformat()}] Uploaded {uploaded.name}")
+            try:
+                result = load_file(uploaded.name, file_bytes, sheet)
+                st.session_state.df = result.df
+                st.session_state.file_name = uploaded.name
+                st.session_state.mapping = suggest_mapping(list(result.df.columns))
+                st.session_state.audit_trail.append(f"[{datetime.utcnow().isoformat()}] Uploaded {uploaded.name}")
 
-            st.success("File ingested and cleaned.")
-            st.write("Data cleaning notes:")
-            for note in result.cleaning_notes:
-                st.write(f"- {note}")
+                st.success("File ingested and cleaned.")
+                st.write("Data cleaning notes:")
+                for note in result.cleaning_notes:
+                    st.write(f"- {note}")
+            except Exception as exc:
+                st.error(f"Could not ingest file: {exc}")
 
     if "df" in st.session_state:
         st.write("Preview")
@@ -132,16 +139,19 @@ if section == "Build Triangle":
             segment_filter = None if pick == "<All>" else pick
 
         if st.button("Build Triangle"):
-            tri = build_triangle(
-                st.session_state.df,
-                st.session_state.mapping,
-                st.session_state.triangle_basis,
-                st.session_state.period_grain,
-                segment_filter=segment_filter,
-            )
-            st.session_state.triangle = tri
-            st.session_state.segment_filter = segment_filter
-            st.session_state.audit_trail.append(f"[{datetime.utcnow().isoformat()}] Built triangle ({st.session_state.triangle_basis})")
+            try:
+                tri = build_triangle(
+                    st.session_state.df,
+                    st.session_state.mapping,
+                    st.session_state.triangle_basis,
+                    st.session_state.period_grain,
+                    segment_filter=segment_filter,
+                )
+                st.session_state.triangle = tri
+                st.session_state.segment_filter = segment_filter
+                st.session_state.audit_trail.append(f"[{datetime.utcnow().isoformat()}] Built triangle ({st.session_state.triangle_basis})")
+            except Exception as exc:
+                st.error(f"Could not build triangle: {exc}")
 
         if "triangle" in st.session_state:
             view = st.radio("View", ["Incremental", "Cumulative"], horizontal=True)
@@ -160,26 +170,31 @@ if section == "Methods":
         apply_tail = st.checkbox("Apply tail factor (1.02)", value=False)
         n_sims = st.number_input("Bootstrap simulation count", min_value=200, max_value=10000, step=100, value=1000)
         exclusions_text = st.text_input("Exclude link ratio cells (row,col pairs, e.g. 0,1;2,3)")
-
         exclusion_set = set()
-        if exclusions_text.strip():
-            for token in exclusions_text.split(";"):
-                row, col = token.split(",")
-                exclusion_set.add((int(row.strip()), int(col.strip())))
+        try:
+            exclusion_set = parse_exclusion_cells(exclusions_text)
+        except ValueError as exc:
+            st.error(str(exc))
 
         if st.button("Run methods"):
-            with st.spinner("Running deterministic and bootstrap models..."):
-                det = run_chain_ladder(st.session_state.triangle.cumulative, apply_tail, exclusions=exclusion_set)
-                boot = run_bootstrap_chain_ladder(st.session_state.triangle.cumulative, n_sims=int(n_sims))
-                st.session_state.det_result = det
-                st.session_state.boot_result = boot
-                st.session_state.assumptions = {
-                    "tail_factor": apply_tail,
-                    "bootstrap_sims": int(n_sims),
-                    "excluded_cells": sorted(list(exclusion_set)),
-                }
-                st.session_state.audit_trail.append(f"[{datetime.utcnow().isoformat()}] Ran models with {n_sims} sims")
-            st.success("Models completed.")
+            if exclusions_text.strip() and not exclusion_set:
+                st.warning("Fix exclusion format before running methods.")
+            else:
+                try:
+                    with st.spinner("Running deterministic and bootstrap models..."):
+                        det = run_chain_ladder(st.session_state.triangle.cumulative, apply_tail, exclusions=exclusion_set)
+                        boot = run_bootstrap_chain_ladder(st.session_state.triangle.cumulative, n_sims=int(n_sims))
+                        st.session_state.det_result = det
+                        st.session_state.boot_result = boot
+                        st.session_state.assumptions = {
+                            "tail_factor": apply_tail,
+                            "bootstrap_sims": int(n_sims),
+                            "excluded_cells": sorted(list(exclusion_set)),
+                        }
+                        st.session_state.audit_trail.append(f"[{datetime.utcnow().isoformat()}] Ran models with {n_sims} sims")
+                    st.success("Models completed.")
+                except Exception as exc:
+                    st.error(f"Model run failed: {exc}")
 
 if section == "Diagnostics":
     st.subheader("Diagnostics")
@@ -255,27 +270,30 @@ if section == "AI Assistant":
                 question = text
 
         if st.button("Ask Assistant") and question:
-            det = st.session_state.det_result
-            boot = st.session_state.boot_result
-            context = AIContext(
-                mapping=st.session_state.mapping,
-                assumptions=st.session_state.get("assumptions", {}),
-                reserve_summary={
-                    "total_ibnr": float(det.ibnr.sum()),
-                    "ibnr_by_origin": det.ibnr.to_dict(),
-                    "ultimates_by_origin": det.ultimates.to_dict(),
-                },
-                diagnostics_summary={
-                    "selected_ldf": det.selected_ldf.to_dict(),
-                    "cdf": det.cdf.to_dict(),
-                },
-                chart_summary={
-                    "bootstrap_percentiles": {k: float(v) for k, v in boot.summary.to_dict().items()},
-                },
-            )
-            answer = ask_assistant(question, context)
-            st.session_state.last_ai_answer = answer
-            st.write(answer)
+            try:
+                det = st.session_state.det_result
+                boot = st.session_state.boot_result
+                context = AIContext(
+                    mapping=st.session_state.mapping,
+                    assumptions=st.session_state.get("assumptions", {}),
+                    reserve_summary={
+                        "total_ibnr": float(det.ibnr.sum()),
+                        "ibnr_by_origin": det.ibnr.to_dict(),
+                        "ultimates_by_origin": det.ultimates.to_dict(),
+                    },
+                    diagnostics_summary={
+                        "selected_ldf": det.selected_ldf.to_dict(),
+                        "cdf": det.cdf.to_dict(),
+                    },
+                    chart_summary={
+                        "bootstrap_percentiles": {k: float(v) for k, v in boot.summary.to_dict().items()},
+                    },
+                )
+                answer = ask_assistant(question, context)
+                st.session_state.last_ai_answer = answer
+                st.write(answer)
+            except Exception as exc:
+                st.error(f"Assistant request failed: {exc}")
 
 if section == "Reports":
     st.subheader("Reporting")
@@ -285,14 +303,17 @@ if section == "Reports":
     else:
         comments = st.text_area("Actuary comments / notes")
         if st.button("Generate PDF report"):
-            pdf = build_pdf_report(
-                portfolio=st.session_state.get("segment_filter") or "All",
-                selected_factors=st.session_state.det_result.selected_ldf,
-                ibnr=st.session_state.det_result.ibnr,
-                bootstrap_summary=st.session_state.boot_result.summary,
-                comments=comments,
-            )
-            st.download_button("Download PDF", data=pdf, file_name="reserving_report.pdf", mime="application/pdf")
+            try:
+                pdf = build_pdf_report(
+                    portfolio=st.session_state.get("segment_filter") or "All",
+                    selected_factors=st.session_state.det_result.selected_ldf,
+                    ibnr=st.session_state.det_result.ibnr,
+                    bootstrap_summary=st.session_state.boot_result.summary,
+                    comments=comments,
+                )
+                st.download_button("Download PDF", data=pdf, file_name="reserving_report.pdf", mime="application/pdf")
+            except Exception as exc:
+                st.error(f"Could not generate PDF report: {exc}")
 
         tables = {
             "triangle_incremental": st.session_state.triangle.incremental,
@@ -302,8 +323,11 @@ if section == "Reports":
             "ibnr": st.session_state.det_result.ibnr.to_frame("ibnr"),
             "bootstrap_summary": st.session_state.boot_result.summary.to_frame("value"),
         }
-        xlsx_bytes = export_tables_to_excel(tables)
-        st.download_button("Download all result tables (Excel)", data=xlsx_bytes, file_name="reserving_outputs.xlsx")
+        try:
+            xlsx_bytes = export_tables_to_excel(tables)
+            st.download_button("Download all result tables (Excel)", data=xlsx_bytes, file_name="reserving_outputs.xlsx")
+        except Exception as exc:
+            st.error(f"Could not export Excel file: {exc}")
 
         st.write("Audit trail")
         st.dataframe(pd.DataFrame({"event": st.session_state.audit_trail}))
