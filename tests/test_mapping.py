@@ -1,7 +1,6 @@
 import pandas as pd
 
 from reserving_app.services.mapping_validation import validate_mapping
-from app.services.mapping_validation import validate_mapping
 
 
 def test_mapping_validation_ok():
