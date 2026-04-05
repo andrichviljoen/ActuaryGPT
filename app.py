@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 from datetime import datetime
 
 import pandas as pd
@@ -9,18 +8,30 @@ import streamlit as st
 from reserving_app.core.logging_config import setup_logging
 from reserving_app.services.ai_assistant import AIContext, ask_assistant
 from reserving_app.services.charts import bootstrap_histogram
+from reserving_app.services.charts import bootstrap_comparison_histogram
 from reserving_app.services.charts import cumulative_vs_ultimate
 from reserving_app.services.charts import development_factor_chart
 from reserving_app.services.charts import heatmap_from_triangle
 from reserving_app.services.charts import percentile_chart
 from reserving_app.services.charts import reserve_by_origin_chart
 from reserving_app.services.data_ingestion import detect_excel_sheets, load_file
-from reserving_app.services.diagnostics import detect_outlier_link_ratios, sparse_data_warnings
+from reserving_app.services.diagnostics import (
+    detect_outlier_link_ratios,
+    negative_value_warning,
+    non_monotonic_cumulative_warning,
+    sparse_data_warnings,
+)
 from reserving_app.services.mapping_validation import ALL_FIELDS, suggest_mapping, validate_mapping
 from reserving_app.services.input_parsing import parse_exclusion_cells
 from reserving_app.services.reporting import build_pdf_report, export_tables_to_excel
 from reserving_app.services.reserving_models import run_bootstrap_chain_ladder, run_chain_ladder
-from reserving_app.services.triangle_builder import build_triangle
+from reserving_app.services.reserving_models import run_bootstrap_odp_distribution, run_bootstrap_odp_variability_comparison
+from reserving_app.services.triangle_builder import (
+    build_triangle_from_development_matrix,
+    convert_origin_calendar_to_development_triangle,
+    parse_development_period_label,
+    parse_period_label,
+)
 
 setup_logging()
 st.set_page_config(page_title="ActuaryGPT Reserving Studio", layout="wide")
@@ -128,37 +139,72 @@ if section == "Map Fields":
 if section == "Build Triangle":
     st.subheader("Triangle construction")
 
-    if "df" not in st.session_state or "mapping" not in st.session_state:
-        st.info("Upload data and map fields first.")
+    if "df" not in st.session_state:
+        st.info("Upload data first.")
     else:
-        seg_col = st.session_state.mapping.get("segment")
-        segment_filter = None
-        if seg_col:
-            options = ["<All>"] + sorted([str(x) for x in st.session_state.df[seg_col].dropna().unique()])
-            pick = st.selectbox("Segment filter", options)
-            segment_filter = None if pick == "<All>" else pick
+        raw_df = st.session_state.df.copy()
+        st.write("Uploaded raw data preview")
+        st.dataframe(raw_df.head(50), use_container_width=True)
+
+        input_format = st.selectbox("Input Format", ["Development Triangle", "Origin × Calendar Movement Matrix"])
+        cols = raw_df.columns.tolist()
+        origin_col = st.selectbox("Origin period column", cols, index=0)
+
+        if input_format == "Development Triangle":
+            triangle_type = st.radio("Development triangle data type", ["Incremental", "Cumulative"], horizontal=True)
+            candidate_cols = [c for c in cols if c != origin_col]
+            default_dev_cols = []
+            for c in candidate_cols:
+                try:
+                    parse_development_period_label(c)
+                    default_dev_cols.append(c)
+                except Exception:
+                    continue
+            dev_cols = st.multiselect(
+                "Development period columns",
+                options=candidate_cols,
+                default=default_dev_cols or candidate_cols,
+            )
+        else:
+            triangle_type = "Incremental"
+            candidate_cols = [c for c in cols if c != origin_col]
+            calendar_cols = st.multiselect("Calendar/valuation period columns", options=candidate_cols, default=candidate_cols)
 
         if st.button("Build Triangle"):
             try:
-                tri = build_triangle(
-                    st.session_state.df,
-                    st.session_state.mapping,
-                    st.session_state.triangle_basis,
-                    st.session_state.period_grain,
-                    segment_filter=segment_filter,
-                )
+                if input_format == "Development Triangle":
+                    if not dev_cols:
+                        raise ValueError("Please select at least one development period column.")
+                    tri = build_triangle_from_development_matrix(raw_df, origin_col, dev_cols, triangle_type)
+                    st.session_state.audit_trail.append(
+                        f"[{datetime.utcnow().isoformat()}] Built {triangle_type.lower()} development triangle"
+                    )
+                else:
+                    if not calendar_cols:
+                        raise ValueError("Please select at least one calendar/valuation period column.")
+                    # validate period labels prior to conversion
+                    _ = [parse_period_label(str(x)) for x in raw_df[origin_col].dropna().astype(str).tolist()]
+                    _ = [parse_period_label(str(x)) for x in calendar_cols]
+                    tri = convert_origin_calendar_to_development_triangle(raw_df, origin_col, calendar_cols)
+                    st.session_state.audit_trail.append(
+                        f"[{datetime.utcnow().isoformat()}] Built development triangle from origin×calendar matrix"
+                    )
+
                 st.session_state.triangle = tri
-                st.session_state.segment_filter = segment_filter
-                st.session_state.audit_trail.append(f"[{datetime.utcnow().isoformat()}] Built triangle ({st.session_state.triangle_basis})")
+                st.session_state.input_format = input_format
+                st.success("Triangle built successfully.")
             except Exception as exc:
                 st.error(f"Could not build triangle: {exc}")
 
         if "triangle" in st.session_state:
-            view = st.radio("View", ["Incremental", "Cumulative"], horizontal=True)
-            table = st.session_state.triangle.incremental if view == "Incremental" else st.session_state.triangle.cumulative
-            st.dataframe(table, use_container_width=True)
+            st.write("Transformed incremental development triangle preview")
+            st.dataframe(st.session_state.triangle.incremental, use_container_width=True)
+            st.write("Transformed cumulative development triangle preview")
+            st.dataframe(st.session_state.triangle.cumulative, use_container_width=True)
 
-            csv_bytes = table.to_csv().encode("utf-8")
+            view = st.radio("Download view", ["Incremental", "Cumulative"], horizontal=True)
+            table = st.session_state.triangle.incremental if view == "Incremental" else st.session_state.triangle.cumulative
+            csv_bytes = table.to_csv(index=True).encode("utf-8")
             st.download_button("Download triangle CSV", data=csv_bytes, file_name="triangle.csv")
 
 if section == "Methods":
@@ -202,15 +248,21 @@ if section == "Diagnostics":
     if "det_result" not in st.session_state:
         st.info("Run methods first.")
     else:
+        tri_inc = st.session_state.triangle.incremental
         tri = st.session_state.triangle.cumulative
         det = st.session_state.det_result
 
         for warning in sparse_data_warnings(tri):
             st.warning(warning)
+        for warning in negative_value_warning(tri_inc):
+            st.warning(warning)
+        for warning in non_monotonic_cumulative_warning(tri):
+            st.warning(warning)
 
         link_ratios = det.diagnostics["link_ratios"]
         outliers = detect_outlier_link_ratios(link_ratios)
 
+        st.plotly_chart(heatmap_from_triangle(tri_inc, "Incremental Development Triangle Heatmap"), use_container_width=True)
         st.plotly_chart(heatmap_from_triangle(tri, "Cumulative Triangle Heatmap"), use_container_width=True)
         st.plotly_chart(heatmap_from_triangle(link_ratios.fillna(0), "Link Ratio Heatmap"), use_container_width=True)
 
@@ -248,6 +300,41 @@ if section == "Results":
         st.dataframe(det.selected_ldf.rename("factor"))
         st.write("IBNR by origin")
         st.dataframe(det.ibnr.rename("ibnr"))
+
+        with st.expander("Bootstrap ODP plots (Chainladder examples adapted)", expanded=False):
+            st.caption("Uses current selected development triangle from this app.")
+            bs_default = int(st.session_state.get("assumptions", {}).get("bootstrap_sims", 1000))
+            bs_sims = st.number_input("Bootstrap simulations (ODP plot)", min_value=200, max_value=20000, value=bs_default, step=100)
+            bs_seed = st.number_input("Random seed", min_value=0, max_value=999999, value=42, step=1)
+            run_variability = st.checkbox("Run variability comparison (drop outlier link ratios)", value=True)
+            drop_high_count = st.number_input("drop_high count", min_value=0, max_value=10, value=1, step=1)
+            drop_low_count = st.number_input("drop_low count", min_value=0, max_value=10, value=1, step=1)
+
+            if st.button("Run Bootstrap ODP plots"):
+                try:
+                    basic_dist = run_bootstrap_odp_distribution(
+                        st.session_state.triangle.cumulative,
+                        n_sims=int(bs_sims),
+                        random_state=int(bs_seed),
+                    )
+                    st.plotly_chart(bootstrap_histogram(basic_dist), use_container_width=True)
+                    basic_summary = basic_dist.describe(percentiles=[0.5, 0.75, 0.9, 0.95, 0.99]).rename("value")
+                    st.write("Basic Bootstrap ODP summary")
+                    st.dataframe(basic_summary.to_frame())
+
+                    if run_variability:
+                        comp = run_bootstrap_odp_variability_comparison(
+                            st.session_state.triangle.cumulative,
+                            n_sims=int(bs_sims),
+                            random_state=int(bs_seed),
+                            drop_high_count=int(drop_high_count),
+                            drop_low_count=int(drop_low_count),
+                        )
+                        st.plotly_chart(bootstrap_comparison_histogram(comp), use_container_width=True)
+                        st.write("Variability comparison summary")
+                        st.dataframe(comp.describe(percentiles=[0.5, 0.75, 0.9, 0.95]))
+                except Exception as exc:
+                    st.error(f"Bootstrap ODP plots could not be generated for this triangle: {exc}")
 
 if section == "AI Assistant":
     st.subheader("ChatGPT reserve assistant")
