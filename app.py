@@ -9,6 +9,9 @@ import streamlit as st
 from reserving_app.core.logging_config import setup_logging
 from reserving_app.services.ai_assistant import AIContext, ask_assistant
 from reserving_app.services.charts import (
+from app.core.logging_config import setup_logging
+from app.services.ai_assistant import AIContext, ask_assistant
+from app.services.charts import (
     bootstrap_histogram,
     cumulative_vs_ultimate,
     development_factor_chart,
@@ -22,6 +25,12 @@ from reserving_app.services.mapping_validation import ALL_FIELDS, suggest_mappin
 from reserving_app.services.reporting import build_pdf_report, export_tables_to_excel
 from reserving_app.services.reserving_models import run_bootstrap_chain_ladder, run_chain_ladder
 from reserving_app.services.triangle_builder import build_triangle
+from app.services.data_ingestion import detect_excel_sheets, load_file
+from app.services.diagnostics import detect_outlier_link_ratios, sparse_data_warnings
+from app.services.mapping_validation import ALL_FIELDS, suggest_mapping, validate_mapping
+from app.services.reporting import build_pdf_report, export_tables_to_excel
+from app.services.reserving_models import run_bootstrap_chain_ladder, run_chain_ladder
+from app.services.triangle_builder import build_triangle
 
 setup_logging()
 st.set_page_config(page_title="ActuaryGPT Reserving Studio", layout="wide")
