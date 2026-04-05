@@ -77,9 +77,9 @@ def build_triangle(
 
 def _latest_diagonal(cumulative_triangle: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    cols = list(cumulative_triangle.columns)
-    for idx, origin in enumerate(cumulative_triangle.index):
-        row = cumulative_triangle.loc[origin]
+    for idx in range(len(cumulative_triangle.index)):
+        origin = cumulative_triangle.index[idx]
+        row = cumulative_triangle.iloc[idx]
         observed = row[row > 0]
         if observed.empty:
             continue
@@ -147,6 +147,9 @@ def build_triangle_from_development_matrix(
         raise ValueError(f"Origin column '{origin_col}' not found.")
     if not development_columns:
         raise ValueError("No development period columns selected.")
+    missing_development_columns = [col for col in development_columns if col not in df.columns]
+    if missing_development_columns:
+        raise ValueError(f"Development columns not found: {missing_development_columns}")
 
     dev_pairs = sorted([(col, parse_development_period_label(col)) for col in development_columns], key=lambda x: x[1])
     ordered_cols = [pair[0] for pair in dev_pairs]
@@ -154,10 +157,15 @@ def build_triangle_from_development_matrix(
 
     work = df[[origin_col] + ordered_cols].copy()
     work = work.dropna(subset=[origin_col])
-    work[origin_col] = work[origin_col].astype(str)
+    if work.empty:
+        raise ValueError("No valid origin periods found.")
+    work[origin_col] = work[origin_col].astype(str).str.strip()
+    origin_sort_keys = {origin: parse_period_label(origin) for origin in work[origin_col].unique()}
     numeric = work[ordered_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     numeric.columns = dev_labels
-    numeric.index = work[origin_col]
+    numeric["_origin"] = work[origin_col].values
+    numeric = numeric.groupby("_origin", as_index=True).sum()
+    numeric = numeric.loc[sorted(numeric.index, key=lambda label: origin_sort_keys[label])]
 
     if data_type == "Incremental":
         incremental = numeric
@@ -179,8 +187,11 @@ def convert_origin_calendar_to_development_triangle(
         raise ValueError(f"Origin column '{origin_col}' not found.")
     if not calendar_columns:
         raise ValueError("No calendar period columns selected.")
+    missing_calendar_columns = [col for col in calendar_columns if col not in df.columns]
+    if missing_calendar_columns:
+        raise ValueError(f"Calendar columns not found: {missing_calendar_columns}")
 
-    origins_raw = df[origin_col].dropna().astype(str).tolist()
+    origins_raw = df[origin_col].dropna().astype(str).str.strip().tolist()
     if not origins_raw:
         raise ValueError("No valid origin periods found.")
 
@@ -188,15 +199,16 @@ def convert_origin_calendar_to_development_triangle(
     ordered_periods = order_period_labels(all_periods)
     period_to_idx = {p: i for i, p in enumerate(ordered_periods)}
 
-    rows = []
+    values_by_origin_and_lag: dict[tuple[str, int], float] = {}
+    origins_seen = set()
     dev_max = 0
     for _, row in df.iterrows():
-        origin = str(row.get(origin_col))
+        origin = str(row.get(origin_col)).strip()
         if origin not in period_to_idx:
             raise ValueError(f"Origin period '{origin}' cannot be aligned to ordered periods.")
+        origins_seen.add(origin)
         origin_idx = period_to_idx[origin]
 
-        dev_values: dict[int, float] = {}
         for cal_col in calendar_columns:
             cal_label = str(cal_col)
             if cal_label not in period_to_idx:
@@ -207,18 +219,16 @@ def convert_origin_calendar_to_development_triangle(
             lag = cal_idx - origin_idx + 1
             value = pd.to_numeric(pd.Series([row.get(cal_col)]), errors="coerce").iloc[0]
             value = 0.0 if pd.isna(value) else float(value)
-            dev_values[lag] = dev_values.get(lag, 0.0) + value
+            key = (origin, lag)
+            values_by_origin_and_lag[key] = values_by_origin_and_lag.get(key, 0.0) + value
             dev_max = max(dev_max, lag)
 
-        rows.append((origin, dev_values))
-
+    sorted_origins = sorted(origins_seen, key=parse_period_label)
     dev_columns = [f"Dev {i}" for i in range(1, dev_max + 1)]
-    inc_matrix = []
-    origin_labels = []
-    for origin, dev_values in rows:
-        origin_labels.append(origin)
-        inc_matrix.append([dev_values.get(i, 0.0) for i in range(1, dev_max + 1)])
-
-    incremental = pd.DataFrame(inc_matrix, index=origin_labels, columns=dev_columns)
+    inc_matrix = [
+        [values_by_origin_and_lag.get((origin, i), 0.0) for i in range(1, dev_max + 1)]
+        for origin in sorted_origins
+    ]
+    incremental = pd.DataFrame(inc_matrix, index=sorted_origins, columns=dev_columns)
     cumulative = incremental.cumsum(axis=1)
     return TriangleArtifacts(incremental=incremental, cumulative=cumulative, latest_diagonal=_latest_diagonal(cumulative))
