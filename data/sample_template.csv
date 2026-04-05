@@ -1,0 +1,5 @@
+origin_period,development_period,paid_amount,incurred_amount,reported_count,paid_count,claim_id,segment
+2020-01-01,2020-12-31,100000,150000,40,25,CLM001,Motor
+2020-01-01,2021-12-31,60000,110000,44,29,CLM001,Motor
+2021-01-01,2021-12-31,120000,180000,42,27,CLM002,Property
+2021-01-01,2022-12-31,70000,125000,47,32,CLM002,Property
