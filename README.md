@@ -139,6 +139,8 @@ python -m py_compile app.py reserving_app/core/*.py reserving_app/services/*.py
 pytest -q
 ```
 
+Developer architecture/reference notes are available in `DEVELOPER_CHAINLADDER.md`.
+
 ## Troubleshooting
 
 - **OpenAI assistant returns key error**  
