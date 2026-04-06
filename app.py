@@ -14,7 +14,7 @@ from reserving_app.services.charts import development_factor_chart
 from reserving_app.services.charts import heatmap_from_triangle
 from reserving_app.services.charts import percentile_chart
 from reserving_app.services.charts import reserve_by_origin_chart
-from reserving_app.services.chainladder_demo import SAMPLE_DATASETS, load_chainladder_sample
+from reserving_app.services.chainladder_demo import load_genins_demo
 from reserving_app.services.data_ingestion import detect_excel_sheets, load_file
 from reserving_app.services.diagnostics import (
     detect_outlier_link_ratios,
@@ -67,8 +67,7 @@ section = st.sidebar.radio(
 with st.sidebar:
     st.markdown("---")
     demo_mode = st.button("One-click demo mode")
-    sample_dataset = st.selectbox("chainladder sample dataset", options=SAMPLE_DATASETS, index=SAMPLE_DATASETS.index("genins"))
-    chainladder_demo_mode = st.button("Load chainladder sample dataset")
+    chainladder_demo_mode = st.button("Load chainladder demo (genins)")
 
 if demo_mode:
     try:
@@ -82,7 +81,7 @@ if demo_mode:
 
 if chainladder_demo_mode:
     try:
-        tri, sim_ldf, demo_source = load_chainladder_sample(sample_dataset)
+        tri, sim_ldf = load_genins_demo()
         st.session_state.triangle = tri
         st.session_state.df = tri.incremental.reset_index().rename(columns={"index": "origin"})
         st.session_state.file_name = "chainladder_genins_demo"
@@ -98,12 +97,7 @@ if chainladder_demo_mode:
         }
         st.session_state.period_grain = "Yearly"
         st.session_state.chainladder_demo_sim_ldf = sim_ldf
-        if demo_source == "chainladder_package":
-            st.success(f"Loaded chainladder '{sample_dataset}' sample triangle and bootstrap LDF sample.")
-        else:
-            st.warning(
-                "Loaded local genins snapshot because chainladder runtime is unavailable in this environment."
-            )
+        st.success("Loaded chainladder 'genins' demo triangle and bootstrap LDF sample.")
     except Exception as exc:
         st.error(f"Unable to load chainladder demo: {exc}")
 
