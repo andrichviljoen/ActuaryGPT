@@ -83,12 +83,16 @@ def run_chain_ladder(cumulative: pd.DataFrame, apply_tail_factor: bool, exclusio
         cdf_values.append(running)
     cdf = pd.Series(list(reversed(cdf_values)), index=selected.index)
 
-    latest = cumulative.replace(0, np.nan).ffill(axis=1).iloc[:, -1].fillna(0.0)
+    observed_triangle = cumulative.replace(0, np.nan)
+    latest = observed_triangle.ffill(axis=1).iloc[:, -1].fillna(0.0)
 
-    development_cols = [c for c in cumulative.columns if c in selected.index]
-    last_dev_position = cumulative.notna().sum(axis=1) - 2
+    observed_counts = observed_triangle.notna().sum(axis=1)
+    last_dev_position = (observed_counts - 1).clip(lower=0)
     row_cdf = []
-    for pos in last_dev_position:
+    for pos, latest_value in zip(last_dev_position, latest.values):
+        if float(latest_value) <= 0:
+            row_cdf.append(1.0)
+            continue
         pos = max(min(int(pos), len(cdf) - 1), 0)
         row_cdf.append(float(cdf.iloc[pos]))
 
