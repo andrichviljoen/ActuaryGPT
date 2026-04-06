@@ -30,6 +30,17 @@ class AIContext:
         )
 
 
+def resolve_ai_request_state(current_question: str, preset_question: str | None, ask_clicked: bool) -> tuple[str, bool]:
+    question = current_question or ""
+    should_submit = False
+    if preset_question:
+        question = preset_question
+        should_submit = True
+    elif ask_clicked and question.strip():
+        should_submit = True
+    return question, should_submit
+
+
 def ask_assistant(question: str, context: AIContext) -> str:
     if not CONFIG.openai_api_key:
         return "OpenAI API key not configured. Add OPENAI_API_KEY in your environment to use AI Assistant."
