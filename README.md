@@ -34,7 +34,6 @@ A production-style Streamlit web application for actuarial reserving analysis wi
 - One-click demo mode (`data/demo_claims.csv`)
 - Chainladder demo mode using official sample dataset `cl.load_sample("genins")`, with
   `BootstrapODPSample(random_state=42).fit_transform(...)` and `Development().fit(...).ldf_`.
-  If chainladder runtime is unavailable, app falls back to a bundled `genins` snapshot for demo continuity.
 - Actuarial notes and audit trail in session state.
 
 ## Architecture

@@ -81,7 +81,7 @@ if demo_mode:
 
 if chainladder_demo_mode:
     try:
-        tri, sim_ldf, demo_source = load_genins_demo()
+        tri, sim_ldf = load_genins_demo()
         st.session_state.triangle = tri
         st.session_state.df = tri.incremental.reset_index().rename(columns={"index": "origin"})
         st.session_state.file_name = "chainladder_genins_demo"
@@ -97,12 +97,7 @@ if chainladder_demo_mode:
         }
         st.session_state.period_grain = "Yearly"
         st.session_state.chainladder_demo_sim_ldf = sim_ldf
-        if demo_source == "chainladder_package":
-            st.success("Loaded chainladder 'genins' demo triangle and bootstrap LDF sample.")
-        else:
-            st.warning(
-                "Loaded local genins snapshot because chainladder runtime is unavailable in this environment."
-            )
+        st.success("Loaded chainladder 'genins' demo triangle and bootstrap LDF sample.")
     except Exception as exc:
         st.error(f"Unable to load chainladder demo: {exc}")
 
