@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from reserving_app.core.logging_config import setup_logging
-from reserving_app.services.ai_assistant import AIContext, ask_assistant
+from reserving_app.services.ai_assistant import AIContext, ask_assistant, resolve_ai_request_state
 from reserving_app.services.charts import bootstrap_histogram
 from reserving_app.services.charts import bootstrap_comparison_histogram
 from reserving_app.services.charts import cumulative_vs_ultimate
@@ -14,6 +14,7 @@ from reserving_app.services.charts import development_factor_chart
 from reserving_app.services.charts import heatmap_from_triangle
 from reserving_app.services.charts import percentile_chart
 from reserving_app.services.charts import reserve_by_origin_chart
+from reserving_app.services.chainladder_demo import load_genins_demo
 from reserving_app.services.data_ingestion import detect_excel_sheets, load_file
 from reserving_app.services.diagnostics import (
     detect_outlier_link_ratios,
@@ -26,7 +27,9 @@ from reserving_app.services.input_parsing import parse_exclusion_cells
 from reserving_app.services.reporting import build_pdf_report, export_tables_to_excel
 from reserving_app.services.reserving_models import run_bootstrap_chain_ladder, run_chain_ladder
 from reserving_app.services.reserving_models import run_bootstrap_odp_distribution, run_bootstrap_odp_variability_comparison
+from reserving_app.services.reserving_models import run_chainladder_model
 from reserving_app.services.triangle_builder import (
+    build_triangle,
     build_triangle_from_development_matrix,
     convert_origin_calendar_to_development_triangle,
     parse_development_period_label,
@@ -39,6 +42,10 @@ st.set_page_config(page_title="ActuaryGPT Reserving Studio", layout="wide")
 
 if "audit_trail" not in st.session_state:
     st.session_state.audit_trail = []
+if "ai_question" not in st.session_state:
+    st.session_state.ai_question = ""
+if "ai_run_request" not in st.session_state:
+    st.session_state.ai_run_request = False
 
 st.title("ActuaryGPT Reserving Studio")
 st.caption("Professional reserving workflow for paid/incurred claims, diagnostics, and AI commentary.")
@@ -60,6 +67,7 @@ section = st.sidebar.radio(
 with st.sidebar:
     st.markdown("---")
     demo_mode = st.button("One-click demo mode")
+    chainladder_demo_mode = st.button("Load chainladder demo (genins)")
 
 if demo_mode:
     try:
@@ -70,6 +78,33 @@ if demo_mode:
         st.success("Demo dataset loaded.")
     except Exception as exc:
         st.error(f"Unable to load demo dataset: {exc}")
+
+if chainladder_demo_mode:
+    try:
+        tri, sim_ldf, demo_source = load_genins_demo()
+        st.session_state.triangle = tri
+        st.session_state.df = tri.incremental.reset_index().rename(columns={"index": "origin"})
+        st.session_state.file_name = "chainladder_genins_demo"
+        st.session_state.mapping = {
+            "origin_period": "origin",
+            "development_period": None,
+            "paid_amount": None,
+            "incurred_amount": None,
+            "reported_count": None,
+            "paid_count": None,
+            "claim_id": None,
+            "segment": None,
+        }
+        st.session_state.period_grain = "Yearly"
+        st.session_state.chainladder_demo_sim_ldf = sim_ldf
+        if demo_source == "chainladder_package":
+            st.success("Loaded chainladder 'genins' demo triangle and bootstrap LDF sample.")
+        else:
+            st.warning(
+                "Loaded local genins snapshot because chainladder runtime is unavailable in this environment."
+            )
+    except Exception as exc:
+        st.error(f"Unable to load chainladder demo: {exc}")
 
 if section == "Upload Data":
     st.subheader("Upload claims data")
@@ -146,9 +181,34 @@ if section == "Build Triangle":
         st.write("Uploaded raw data preview")
         st.dataframe(raw_df.head(50), use_container_width=True)
 
-        input_format = st.selectbox("Input Format", ["Development Triangle", "Origin × Calendar Movement Matrix"])
+        input_format = st.selectbox(
+            "Input Format",
+            ["Mapped Transactional Data", "Development Triangle", "Origin × Calendar Movement Matrix"],
+        )
         cols = raw_df.columns.tolist()
-        origin_col = st.selectbox("Origin period column", cols, index=0)
+        if input_format == "Mapped Transactional Data":
+            origin_col = None
+            triangle_type = "Incremental"
+            dev_cols = []
+            calendar_cols = []
+            if "mapping" not in st.session_state:
+                st.warning("Map fields first before building a triangle from transactional data.")
+            else:
+                mapping = st.session_state.mapping
+                basis = st.session_state.get("triangle_basis", "paid_amount")
+                basis_col = mapping.get(basis)
+                st.caption(f"Using mapped basis: **{basis}** → `{basis_col}`")
+
+                segment_filter = None
+                segment_col = mapping.get("segment")
+                if segment_col and segment_col in raw_df.columns:
+                    segment_options = ["All"] + sorted(raw_df[segment_col].dropna().astype(str).unique().tolist())
+                    selected_segment = st.selectbox("Segment filter", segment_options, index=0)
+                    segment_filter = None if selected_segment == "All" else selected_segment
+                st.session_state.segment_filter = segment_filter
+        else:
+            origin_col = st.selectbox("Origin period column", cols, index=0)
+            segment_filter = None
 
         if input_format == "Development Triangle":
             triangle_type = st.radio("Development triangle data type", ["Incremental", "Cumulative"], horizontal=True)
@@ -179,19 +239,47 @@ if section == "Build Triangle":
                     st.session_state.audit_trail.append(
                         f"[{datetime.utcnow().isoformat()}] Built {triangle_type.lower()} development triangle"
                     )
+                elif input_format == "Mapped Transactional Data":
+                    mapping = st.session_state.get("mapping", {})
+                    basis = st.session_state.get("triangle_basis", "paid_amount")
+                    validation = validate_mapping(mapping, raw_df, basis)
+                    if not validation.valid:
+                        raise ValueError("Cannot build triangle from mapped data: " + "; ".join(validation.errors))
+                    tri = build_triangle(
+                        raw_df,
+                        mapping,
+                        basis,
+                        st.session_state.get("period_grain", "Yearly"),
+                        segment_filter=st.session_state.get("segment_filter"),
+                    )
+                    st.session_state.audit_trail.append(
+                        f"[{datetime.utcnow().isoformat()}] Built mapped transactional triangle ({basis})"
+                    )
                 else:
                     if not calendar_cols:
                         raise ValueError("Please select at least one calendar/valuation period column.")
                     # validate period labels prior to conversion
                     _ = [parse_period_label(str(x)) for x in raw_df[origin_col].dropna().astype(str).tolist()]
                     _ = [parse_period_label(str(x)) for x in calendar_cols]
-                    tri = convert_origin_calendar_to_development_triangle(raw_df, origin_col, calendar_cols)
+                    tri = convert_origin_calendar_to_development_triangle(
+                        raw_df,
+                        origin_col,
+                        calendar_cols,
+                    )
                     st.session_state.audit_trail.append(
                         f"[{datetime.utcnow().isoformat()}] Built development triangle from origin×calendar matrix"
                     )
 
                 st.session_state.triangle = tri
                 st.session_state.input_format = input_format
+                st.session_state.triangle_meta = {
+                    "input_format": input_format,
+                    "origin_column": origin_col if input_format != "Mapped Transactional Data" else st.session_state.get("mapping", {}).get("origin_period"),
+                    "development_column": None if input_format == "Development Triangle" else (origin_col if input_format == "Origin × Calendar Movement Matrix" else st.session_state.get("mapping", {}).get("development_period")),
+                    "value_column": st.session_state.get("mapping", {}).get(st.session_state.get("triangle_basis", "paid_amount")),
+                    "grain": st.session_state.get("period_grain", "Yearly"),
+                    "basis": st.session_state.get("triangle_basis", "paid_amount"),
+                }
                 st.success("Triangle built successfully.")
             except Exception as exc:
                 st.error(f"Could not build triangle: {exc}")
@@ -215,6 +303,21 @@ if section == "Methods":
     else:
         apply_tail = st.checkbox("Apply tail factor (1.02)", value=False)
         n_sims = st.number_input("Bootstrap simulation count", min_value=200, max_value=10000, step=100, value=1000)
+        model_choice = st.selectbox(
+            "Reserving model",
+            [
+                "Chainladder",
+                "MackChainladder",
+                "BornhuetterFerguson",
+                "Benktander",
+                "CapeCod",
+                "Development",
+                "BootstrapODPSample",
+            ],
+            index=0,
+        )
+        apriori = st.number_input("Apriori (for BF/Benktander)", min_value=0.0, value=1.0, step=0.1)
+        benktander_iters = st.number_input("Benktander iterations", min_value=1, max_value=20, step=1, value=2)
         exclusions_text = st.text_input("Exclude link ratio cells (row,col pairs, e.g. 0,1;2,3)")
         exclusion_set = set()
         try:
@@ -228,14 +331,39 @@ if section == "Methods":
             else:
                 try:
                     with st.spinner("Running deterministic and bootstrap models..."):
-                        det = run_chain_ladder(st.session_state.triangle.cumulative, apply_tail, exclusions=exclusion_set)
-                        boot = run_bootstrap_chain_ladder(st.session_state.triangle.cumulative, n_sims=int(n_sims))
+                        if model_choice == "Chainladder" and exclusion_set:
+                            det = run_chain_ladder(st.session_state.triangle.cumulative, apply_tail, exclusions=exclusion_set)
+                            boot = run_bootstrap_chain_ladder(
+                                st.session_state.triangle.cumulative,
+                                n_sims=int(n_sims),
+                                grain=st.session_state.get("period_grain", "Yearly"),
+                            )
+                        else:
+                            det, boot = run_chainladder_model(
+                                st.session_state.triangle.cumulative,
+                                model_name=model_choice,
+                                grain=st.session_state.get("period_grain", "Yearly"),
+                                n_sims=int(n_sims),
+                                apriori=float(apriori),
+                                benktander_iters=int(benktander_iters),
+                            )
+                            if apply_tail and model_choice == "Chainladder":
+                                det = run_chain_ladder(st.session_state.triangle.cumulative, apply_tail, exclusions=exclusion_set)
+                            if boot is None:
+                                boot = run_bootstrap_chain_ladder(
+                                    st.session_state.triangle.cumulative,
+                                    n_sims=int(n_sims),
+                                    grain=st.session_state.get("period_grain", "Yearly"),
+                                )
                         st.session_state.det_result = det
                         st.session_state.boot_result = boot
                         st.session_state.assumptions = {
+                            "model": model_choice,
                             "tail_factor": apply_tail,
                             "bootstrap_sims": int(n_sims),
                             "excluded_cells": sorted(list(exclusion_set)),
+                            "apriori": float(apriori),
+                            "benktander_iters": int(benktander_iters),
                         }
                         st.session_state.audit_trail.append(f"[{datetime.utcnow().isoformat()}] Ran models with {n_sims} sims")
                     st.success("Models completed.")
@@ -298,6 +426,9 @@ if section == "Results":
 
         st.write("Selected development factors")
         st.dataframe(det.selected_ldf.rename("factor"))
+        if "chainladder_demo_sim_ldf" in st.session_state:
+            with st.expander("chainladder demo stochastic LDF sample (from BootstrapODPSample + Development)", expanded=False):
+                st.dataframe(st.session_state.chainladder_demo_sim_ldf.rename("ldf").to_frame())
         st.write("IBNR by origin")
         st.dataframe(det.ibnr.rename("ibnr"))
 
@@ -351,12 +482,20 @@ if section == "AI Assistant":
         }
 
         cols = st.columns(len(prompt_buttons))
-        question = st.text_area("Ask a question about the results")
+        selected_preset = None
         for i, (label, text) in enumerate(prompt_buttons.items()):
             if cols[i].button(label):
-                question = text
+                selected_preset = text
 
-        if st.button("Ask Assistant") and question:
+        st.text_area("Ask a question about the results", key="ai_question")
+        ask_clicked = st.button("Ask Assistant")
+        st.session_state.ai_question, st.session_state.ai_run_request = resolve_ai_request_state(
+            st.session_state.ai_question,
+            selected_preset,
+            ask_clicked,
+        )
+
+        if st.session_state.ai_run_request and st.session_state.ai_question.strip():
             try:
                 det = st.session_state.det_result
                 boot = st.session_state.boot_result
@@ -371,14 +510,16 @@ if section == "AI Assistant":
                     diagnostics_summary={
                         "selected_ldf": det.selected_ldf.to_dict(),
                         "cdf": det.cdf.to_dict(),
+                        "triangle_meta": st.session_state.get("triangle_meta", {}),
                     },
                     chart_summary={
                         "bootstrap_percentiles": {k: float(v) for k, v in boot.summary.to_dict().items()},
                     },
                 )
-                answer = ask_assistant(question, context)
+                answer = ask_assistant(st.session_state.ai_question, context)
                 st.session_state.last_ai_answer = answer
                 st.write(answer)
+                st.session_state.ai_run_request = False
             except Exception as exc:
                 st.error(f"Assistant request failed: {exc}")
 

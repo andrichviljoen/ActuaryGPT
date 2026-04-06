@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from openai import OpenAI
 
 from reserving_app.core.config import CONFIG
+from reserving_app.services.json_utils import to_jsonable
 
 
 @dataclass
@@ -17,17 +18,25 @@ class AIContext:
     chart_summary: dict
 
     def to_prompt_payload(self) -> str:
-        return json.dumps(
-            {
-                "mapping": self.mapping,
-                "assumptions": self.assumptions,
-                "reserve_summary": self.reserve_summary,
-                "diagnostics_summary": self.diagnostics_summary,
-                "chart_summary": self.chart_summary,
-            },
-            indent=2,
-            default=str,
-        )
+        payload = {
+            "mapping": self.mapping,
+            "assumptions": self.assumptions,
+            "reserve_summary": self.reserve_summary,
+            "diagnostics_summary": self.diagnostics_summary,
+            "chart_summary": self.chart_summary,
+        }
+        return json.dumps(to_jsonable(payload), indent=2)
+
+
+def resolve_ai_request_state(current_question: str, preset_question: str | None, ask_clicked: bool) -> tuple[str, bool]:
+    question = current_question or ""
+    should_submit = False
+    if preset_question:
+        question = preset_question
+        should_submit = True
+    elif ask_clicked and question.strip():
+        should_submit = True
+    return question, should_submit
 
 
 def ask_assistant(question: str, context: AIContext) -> str:
