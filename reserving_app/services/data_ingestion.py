@@ -31,11 +31,18 @@ def load_file(file_name: str, file_bytes: bytes, sheet_name: str | None = None) 
         raise ValueError(f"Unsupported file type: {extension}. Use CSV or XLSX.")
 
     if extension == "csv":
-        raw_df = pd.read_csv(io.BytesIO(file_bytes))
+        try:
+            raw_df = pd.read_csv(io.BytesIO(file_bytes))
+        except UnicodeDecodeError:
+            raw_df = pd.read_csv(io.BytesIO(file_bytes), encoding="latin-1")
         sheet_names: list[str] = []
     else:
         sheet_names = detect_excel_sheets(file_bytes)
+        if not sheet_names:
+            raise ValueError("Workbook does not contain any sheets.")
         selected_sheet = sheet_name or sheet_names[0]
+        if selected_sheet not in sheet_names:
+            raise ValueError(f"Sheet '{selected_sheet}' not found. Available sheets: {sheet_names}")
         raw_df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=selected_sheet, engine="openpyxl")
 
     cleaned_df, notes = clean_dataset(raw_df)
