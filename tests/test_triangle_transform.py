@@ -2,8 +2,10 @@ import pandas as pd
 import pytest
 
 from reserving_app.services.triangle_builder import (
+    build_triangle,
     build_triangle_from_development_matrix,
     convert_origin_calendar_to_development_triangle,
+    parse_period_label,
 )
 
 
@@ -102,3 +104,114 @@ def test_convert_origin_calendar_invalid_period_mapping_raises():
     df = pd.DataFrame({"origin": ["2018Q1"], "not_a_period": [100]})
     with pytest.raises(ValueError, match="Could not parse period label"):
         convert_origin_calendar_to_development_triangle(df, "origin", ["not_a_period"])
+
+
+def test_build_triangle_from_mapped_transactional_data_supports_segment_filter():
+    df = pd.DataFrame(
+        {
+            "accident_date": ["2020-01-01", "2020-01-01", "2021-01-01"],
+            "valuation_date": ["2020-12-31", "2021-12-31", "2021-12-31"],
+            "paid": [100, 50, 70],
+            "segment": ["A", "A", "B"],
+        }
+    )
+    mapping = {
+        "origin_period": "accident_date",
+        "development_period": "valuation_date",
+        "paid_amount": "paid",
+        "incurred_amount": None,
+        "reported_count": None,
+        "paid_count": None,
+        "claim_id": None,
+        "segment": "segment",
+    }
+    tri = build_triangle(df, mapping, "paid_amount", "Yearly", segment_filter="A")
+    assert tri.incremental.shape == (1, 2)
+    assert tri.incremental.columns.tolist() == ["Dev 0", "Dev 1"]
+    assert tri.incremental.iloc[0, 0] == 100
+    assert tri.incremental.iloc[0, 1] == 50
+
+
+def test_parse_period_label_accepts_iso_date():
+    year, month = parse_period_label("2018-01-01")
+    assert year == 2018
+    assert month == 1
+
+
+def test_build_triangle_annual_lags():
+    df = pd.DataFrame(
+        {
+            "origin": ["2018-01-01", "2018-01-01"],
+            "dev": ["2018-12-31", "2019-12-31"],
+            "paid": [100, 50],
+        }
+    )
+    mapping = {
+        "origin_period": "origin",
+        "development_period": "dev",
+        "paid_amount": "paid",
+        "incurred_amount": None,
+        "reported_count": None,
+        "paid_count": None,
+        "claim_id": None,
+        "segment": None,
+    }
+    tri = build_triangle(df, mapping, "paid_amount", "Yearly")
+    assert tri.incremental.columns.tolist() == ["Dev 0", "Dev 1"]
+
+
+def test_build_triangle_quarterly_semiannual_monthly_lags():
+    mapping = {
+        "origin_period": "origin",
+        "development_period": "dev",
+        "paid_amount": "paid",
+        "incurred_amount": None,
+        "reported_count": None,
+        "paid_count": None,
+        "claim_id": None,
+        "segment": None,
+    }
+    q_tri = build_triangle(
+        pd.DataFrame({"origin": ["2018Q1", "2018Q1"], "dev": ["2018Q1", "2018Q2"], "paid": [10, 20]}),
+        mapping,
+        "paid_amount",
+        "Quarterly",
+    )
+    h_tri = build_triangle(
+        pd.DataFrame({"origin": ["2018-H1", "2018-H1"], "dev": ["2018-H1", "2018-H2"], "paid": [10, 20]}),
+        mapping,
+        "paid_amount",
+        "Half-Yearly",
+    )
+    m_tri = build_triangle(
+        pd.DataFrame({"origin": ["2018-01", "2018-01"], "dev": ["2018-01", "2018-02"], "paid": [10, 20]}),
+        mapping,
+        "paid_amount",
+        "Monthly",
+    )
+    assert q_tri.incremental.columns.tolist() == ["Dev 0", "Dev 1"]
+    assert h_tri.incremental.columns.tolist() == ["Dev 0", "Dev 1"]
+    assert m_tri.incremental.columns.tolist() == ["Dev 0", "Dev 1"]
+
+
+def test_build_triangle_duplicate_aggregation_and_cumulative():
+    df = pd.DataFrame(
+        {
+            "origin": ["2018-01-01", "2018-01-01", "2018-01-01"],
+            "dev": ["2018-12-31", "2018-12-31", "2019-12-31"],
+            "paid": [100, 30, 40],
+        }
+    )
+    mapping = {
+        "origin_period": "origin",
+        "development_period": "dev",
+        "paid_amount": "paid",
+        "incurred_amount": None,
+        "reported_count": None,
+        "paid_count": None,
+        "claim_id": None,
+        "segment": None,
+    }
+    tri = build_triangle(df, mapping, "paid_amount", "Yearly")
+    assert tri.incremental.loc["2018", "Dev 0"] == 130
+    assert tri.cumulative.loc["2018", "Dev 1"] == 170
