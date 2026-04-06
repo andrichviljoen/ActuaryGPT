@@ -24,6 +24,71 @@ PERIOD_PATTERNS = {
     "yearly": re.compile(r"^(?P<y>\d{4})$"),
 }
 
+GRAIN_TO_FREQ = {
+    "Yearly": "Y",
+    "Half-Yearly": "S",
+    "Quarterly": "Q",
+    "Monthly": "M",
+}
+
+
+def _parse_raw_period(value: object, grain: str) -> pd.Period:
+    if pd.isna(value):
+        raise ValueError("Empty period value.")
+
+    text = str(value).strip()
+    if not text:
+        raise ValueError("Empty period value.")
+
+    normalized = text.upper().replace(" ", "")
+    if grain == "Half-Yearly":
+        match = PERIOD_PATTERNS["half_yearly"].match(normalized)
+        if match:
+            year = int(match.group("y"))
+            half = int(match.group("p"))
+            month = 1 if half == 1 else 7
+            return pd.Period(pd.Timestamp(year=year, month=month, day=1), freq="2Q")
+
+    if grain == "Quarterly":
+        match = PERIOD_PATTERNS["quarterly"].match(normalized)
+        if match:
+            return pd.Period(f"{match.group('y')}Q{match.group('p')}", freq="Q")
+
+    if grain == "Yearly":
+        match = PERIOD_PATTERNS["yearly"].match(normalized)
+        if match:
+            return pd.Period(f"{match.group('y')}", freq="Y")
+
+    if grain == "Monthly":
+        match = PERIOD_PATTERNS["monthly"].match(normalized)
+        if match:
+            return pd.Period(f"{match.group('y')}-{match.group('p')}", freq="M")
+
+    dt = pd.to_datetime([value], errors="coerce")[0]
+    if pd.isna(dt):
+        raise ValueError(f"Could not parse period value '{value}' for grain '{grain}'.")
+
+    freq = GRAIN_TO_FREQ[grain]
+    if freq == "S":
+        month = 1 if dt.month <= 6 else 7
+        return pd.Period(pd.Timestamp(year=dt.year, month=month, day=1), freq="2Q")
+    return pd.Period(dt, freq=freq)
+
+
+def _lag_between(origin: pd.Period, development: pd.Period, grain: str) -> int:
+    if grain == "Yearly":
+        lag = development.year - origin.year
+    elif grain == "Quarterly":
+        lag = (development.year - origin.year) * 4 + (development.quarter - origin.quarter)
+    elif grain == "Half-Yearly":
+        def _half(p: pd.Period) -> int:
+            month = p.start_time.month
+            return 1 if month <= 6 else 2
+        lag = (development.year - origin.year) * 2 + (_half(development) - _half(origin))
+    else:
+        lag = (development.year - origin.year) * 12 + (development.month - origin.month)
+    return int(lag)
+
 
 def _format_period(series: pd.Series, grain: str) -> pd.Series:
     dt = pd.to_datetime(series, errors="coerce")
@@ -55,18 +120,36 @@ def build_triangle(
     dev_col = mapping["development_period"]
     value_col = mapping[value_field]
 
-    work["_origin"] = _format_period(work[origin_col], period_grain)
-    work["_dev"] = _format_period(work[dev_col], period_grain)
+    try:
+        work["_origin_period"] = work[origin_col].map(lambda x: _parse_raw_period(x, period_grain))
+        work["_dev_period"] = work[dev_col].map(lambda x: _parse_raw_period(x, period_grain))
+    except ValueError as exc:
+        raise ValueError(f"Invalid period field in mapped data: {exc}") from exc
+
+    work["_origin"] = work["_origin_period"].astype(str)
+    work["_lag"] = [
+        _lag_between(origin, development, period_grain)
+        for origin, development in zip(work["_origin_period"], work["_dev_period"])
+    ]
+    if (work["_lag"] < 0).any():
+        bad_rows = work.loc[work["_lag"] < 0, [origin_col, dev_col]].head(5)
+        raise ValueError(
+            "Development period is earlier than origin period for some rows. "
+            f"Sample rows: {bad_rows.to_dict(orient='records')}"
+        )
+
     work["_value"] = pd.to_numeric(work[value_col], errors="coerce").fillna(0.0)
 
     incr = (
-        work.groupby(["_origin", "_dev"], dropna=False)["_value"]
+        work.groupby(["_origin", "_lag"], dropna=False)["_value"]
         .sum()
         .reset_index()
-        .pivot(index="_origin", columns="_dev", values="_value")
+        .pivot(index="_origin", columns="_lag", values="_value")
         .fillna(0.0)
-        .sort_index()
+        .sort_index(axis=0)
+        .sort_index(axis=1)
     )
+    incr.columns = [f"Dev {int(c)}" for c in incr.columns]
 
     cumulative = incr.cumsum(axis=1)
     latest_diag = _latest_diagonal(cumulative)
@@ -108,13 +191,30 @@ def parse_period_label(label: str) -> tuple[int, int]:
     Parse a period label into a sortable tuple.
     Supports yearly, half-yearly, quarterly, and monthly formats.
     """
-    text = str(label).strip().upper().replace(" ", "")
-    for _, pattern in PERIOD_PATTERNS.items():
-        match = pattern.match(text)
-        if match:
-            year = int(match.group("y"))
-            period = int(match.group("p")) if "p" in match.groupdict() else 1
-            return year, period
+    text = str(label).strip()
+    normalized = text.upper().replace(" ", "")
+    if PERIOD_PATTERNS["quarterly"].match(normalized):
+        p = _parse_raw_period(text, "Quarterly")
+        return p.year, p.quarter
+    if PERIOD_PATTERNS["half_yearly"].match(normalized):
+        p = _parse_raw_period(text, "Half-Yearly")
+        return p.year, 1 if p.start_time.month <= 6 else 2
+    if PERIOD_PATTERNS["monthly"].match(normalized):
+        p = _parse_raw_period(text, "Monthly")
+        return p.year, p.month
+    if PERIOD_PATTERNS["yearly"].match(normalized):
+        p = _parse_raw_period(text, "Yearly")
+        return p.year, 1
+    try:
+        p = _parse_raw_period(text, "Monthly")
+        return p.year, p.month
+    except ValueError:
+        pass
+    try:
+        p = _parse_raw_period(text, "Yearly")
+        return p.year, 1
+    except ValueError:
+        pass
     raise ValueError(f"Could not parse period label '{label}'.")
 
 
