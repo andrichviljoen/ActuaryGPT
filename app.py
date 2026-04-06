@@ -27,6 +27,7 @@ from reserving_app.services.reporting import build_pdf_report, export_tables_to_
 from reserving_app.services.reserving_models import run_bootstrap_chain_ladder, run_chain_ladder
 from reserving_app.services.reserving_models import run_bootstrap_odp_distribution, run_bootstrap_odp_variability_comparison
 from reserving_app.services.triangle_builder import (
+    build_triangle,
     build_triangle_from_development_matrix,
     convert_origin_calendar_to_development_triangle,
     parse_development_period_label,
@@ -146,9 +147,34 @@ if section == "Build Triangle":
         st.write("Uploaded raw data preview")
         st.dataframe(raw_df.head(50), use_container_width=True)
 
-        input_format = st.selectbox("Input Format", ["Development Triangle", "Origin × Calendar Movement Matrix"])
+        input_format = st.selectbox(
+            "Input Format",
+            ["Mapped Transactional Data", "Development Triangle", "Origin × Calendar Movement Matrix"],
+        )
         cols = raw_df.columns.tolist()
-        origin_col = st.selectbox("Origin period column", cols, index=0)
+        if input_format == "Mapped Transactional Data":
+            origin_col = None
+            triangle_type = "Incremental"
+            dev_cols = []
+            calendar_cols = []
+            if "mapping" not in st.session_state:
+                st.warning("Map fields first before building a triangle from transactional data.")
+            else:
+                mapping = st.session_state.mapping
+                basis = st.session_state.get("triangle_basis", "paid_amount")
+                basis_col = mapping.get(basis)
+                st.caption(f"Using mapped basis: **{basis}** → `{basis_col}`")
+
+                segment_filter = None
+                segment_col = mapping.get("segment")
+                if segment_col and segment_col in raw_df.columns:
+                    segment_options = ["All"] + sorted(raw_df[segment_col].dropna().astype(str).unique().tolist())
+                    selected_segment = st.selectbox("Segment filter", segment_options, index=0)
+                    segment_filter = None if selected_segment == "All" else selected_segment
+                st.session_state.segment_filter = segment_filter
+        else:
+            origin_col = st.selectbox("Origin period column", cols, index=0)
+            segment_filter = None
 
         if input_format == "Development Triangle":
             triangle_type = st.radio("Development triangle data type", ["Incremental", "Cumulative"], horizontal=True)
@@ -178,6 +204,22 @@ if section == "Build Triangle":
                     tri = build_triangle_from_development_matrix(raw_df, origin_col, dev_cols, triangle_type)
                     st.session_state.audit_trail.append(
                         f"[{datetime.utcnow().isoformat()}] Built {triangle_type.lower()} development triangle"
+                    )
+                elif input_format == "Mapped Transactional Data":
+                    mapping = st.session_state.get("mapping", {})
+                    basis = st.session_state.get("triangle_basis", "paid_amount")
+                    validation = validate_mapping(mapping, raw_df, basis)
+                    if not validation.valid:
+                        raise ValueError("Cannot build triangle from mapped data: " + "; ".join(validation.errors))
+                    tri = build_triangle(
+                        raw_df,
+                        mapping,
+                        basis,
+                        st.session_state.get("period_grain", "Yearly"),
+                        segment_filter=st.session_state.get("segment_filter"),
+                    )
+                    st.session_state.audit_trail.append(
+                        f"[{datetime.utcnow().isoformat()}] Built mapped transactional triangle ({basis})"
                     )
                 else:
                     if not calendar_cols:

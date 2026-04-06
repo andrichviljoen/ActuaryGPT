@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from reserving_app.services.triangle_builder import (
+    build_triangle,
     build_triangle_from_development_matrix,
     convert_origin_calendar_to_development_triangle,
 )
@@ -102,3 +103,28 @@ def test_convert_origin_calendar_invalid_period_mapping_raises():
     df = pd.DataFrame({"origin": ["2018Q1"], "not_a_period": [100]})
     with pytest.raises(ValueError, match="Could not parse period label"):
         convert_origin_calendar_to_development_triangle(df, "origin", ["not_a_period"])
+
+
+def test_build_triangle_from_mapped_transactional_data_supports_segment_filter():
+    df = pd.DataFrame(
+        {
+            "accident_date": ["2020-01-01", "2020-01-01", "2021-01-01"],
+            "valuation_date": ["2020-12-31", "2021-12-31", "2021-12-31"],
+            "paid": [100, 50, 70],
+            "segment": ["A", "A", "B"],
+        }
+    )
+    mapping = {
+        "origin_period": "accident_date",
+        "development_period": "valuation_date",
+        "paid_amount": "paid",
+        "incurred_amount": None,
+        "reported_count": None,
+        "paid_count": None,
+        "claim_id": None,
+        "segment": "segment",
+    }
+    tri = build_triangle(df, mapping, "paid_amount", "Yearly", segment_filter="A")
+    assert tri.incremental.shape == (1, 2)
+    assert tri.incremental.iloc[0, 0] == 100
+    assert tri.incremental.iloc[0, 1] == 50
