@@ -14,6 +14,7 @@ from reserving_app.services.charts import development_factor_chart
 from reserving_app.services.charts import heatmap_from_triangle
 from reserving_app.services.charts import percentile_chart
 from reserving_app.services.charts import reserve_by_origin_chart
+from reserving_app.services.chainladder_demo import load_genins_demo
 from reserving_app.services.data_ingestion import detect_excel_sheets, load_file
 from reserving_app.services.diagnostics import (
     detect_outlier_link_ratios,
@@ -66,6 +67,7 @@ section = st.sidebar.radio(
 with st.sidebar:
     st.markdown("---")
     demo_mode = st.button("One-click demo mode")
+    chainladder_demo_mode = st.button("Load chainladder demo (genins)")
 
 if demo_mode:
     try:
@@ -76,6 +78,28 @@ if demo_mode:
         st.success("Demo dataset loaded.")
     except Exception as exc:
         st.error(f"Unable to load demo dataset: {exc}")
+
+if chainladder_demo_mode:
+    try:
+        tri, sim_ldf = load_genins_demo()
+        st.session_state.triangle = tri
+        st.session_state.df = tri.incremental.reset_index().rename(columns={"index": "origin"})
+        st.session_state.file_name = "chainladder_genins_demo"
+        st.session_state.mapping = {
+            "origin_period": "origin",
+            "development_period": None,
+            "paid_amount": None,
+            "incurred_amount": None,
+            "reported_count": None,
+            "paid_count": None,
+            "claim_id": None,
+            "segment": None,
+        }
+        st.session_state.period_grain = "Yearly"
+        st.session_state.chainladder_demo_sim_ldf = sim_ldf
+        st.success("Loaded chainladder 'genins' demo triangle and bootstrap LDF sample.")
+    except Exception as exc:
+        st.error(f"Unable to load chainladder demo: {exc}")
 
 if section == "Upload Data":
     st.subheader("Upload claims data")
@@ -397,6 +421,9 @@ if section == "Results":
 
         st.write("Selected development factors")
         st.dataframe(det.selected_ldf.rename("factor"))
+        if "chainladder_demo_sim_ldf" in st.session_state:
+            with st.expander("chainladder demo stochastic LDF sample (from BootstrapODPSample + Development)", expanded=False):
+                st.dataframe(st.session_state.chainladder_demo_sim_ldf.rename("ldf").to_frame())
         st.write("IBNR by origin")
         st.dataframe(det.ibnr.rename("ibnr"))
 
@@ -478,6 +505,7 @@ if section == "AI Assistant":
                     diagnostics_summary={
                         "selected_ldf": det.selected_ldf.to_dict(),
                         "cdf": det.cdf.to_dict(),
+                        "triangle_meta": st.session_state.get("triangle_meta", {}),
                     },
                     chart_summary={
                         "bootstrap_percentiles": {k: float(v) for k, v in boot.summary.to_dict().items()},

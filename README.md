@@ -32,6 +32,8 @@ A production-style Streamlit web application for actuarial reserving analysis wi
   - all result tables to multi-tab Excel workbook
   - PDF reserving report with management summary + technical appendix
 - One-click demo mode (`data/demo_claims.csv`)
+- Chainladder demo mode using official sample dataset `cl.load_sample("genins")`, with
+  `BootstrapODPSample(random_state=42).fit_transform(...)` and `Development().fit(...).ldf_`.
 - Actuarial notes and audit trail in session state.
 
 ## Architecture
@@ -62,6 +64,7 @@ requirements.txt
 
 Recommended Python: **3.10.x** (validated with Python 3.10.19).  
 `chainladder==0.8.25` is pinned for compatibility with this stack.
+If `chainladder` import fails in your environment, install its runtime dependencies required by your OS.
 
 1. **Create and activate virtual environment**
    ```bash
@@ -88,9 +91,12 @@ Recommended Python: **3.10.x** (validated with Python 3.10.19).
 ## Usage workflow
 
 1. **Upload Data**: upload CSV/XLSX, choose Excel sheet if needed, ingest and preview.
+   - Or use **Load chainladder demo (genins)** in the sidebar.
 2. **Map Fields**: review suggested mapping and adjust manually.
 3. **Build Triangle**: choose segment filter and generate cumulative/incremental triangles.
+   - Mapped transactional data is converted to lag-based development triangles (`Dev 0`, `Dev 1`, ...).
 4. **Methods**: set assumptions, exclude selected link ratio cells, run deterministic + bootstrap.
+   - Supported model selector includes Chainladder, MackChainladder, Development, BootstrapODPSample, and compatible BF/Benktander/CapeCod options.
 5. **Diagnostics**: inspect heatmaps, latest diagonal, and outliers.
 6. **Results**: review IBNR, ultimates, and charts.
 7. **AI Assistant**: ask natural-language actuarial questions and generate narrative outputs.
@@ -106,6 +112,12 @@ Use `data/sample_template.csv` as a starting point for user uploads. Mapping UI 
 - The AI assistant receives summary context (mapping, assumptions, reserves, diagnostics), not raw full datasets by default.
 - API keys are read from environment variables.
 - Input validation and user-friendly error handling are included throughout workflow.
+
+## Chainladder integration details
+
+- Core reserving calculations are executed against official `chainladder.Triangle` objects.
+- Mapped transactional inputs are normalized to grain-aware periods, converted into lag triangles, then transformed to date-like origin/development inputs for chainladder models.
+- AI context serialization normalizes pandas/numpy/time-like values for reliable JSON payloads.
 
 ## Roadmap
 
